@@ -1,0 +1,643 @@
+---
+title: "xeno renal physiologypaper "
+date: "1apr2023"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Install packages
+
+```{r}
+install.packages(c("BiocManager", "tidyverse", "MASS", "reshape2", "reshape", "ggpubr"))
+
+BiocManager::install(c("ComplexHeatmap", "ggplot2", "DESeq2", "dplyr", "apeglm", "knitr", "ggrepel", "EnhancedVolcano", "biomaRt", "PCAtools", "devtools", "limma", "paletteer", "hrbrthemes", "gamlss", "scran", "scater", "SingleCellExperiment", "matrixStats", "SummarizedExperiment", "GenomicRanges", "GenomeInfoDb", "matrixStats", "SingleCellExperiment", "dittoSeq", "oncomix", "sevenbridges", "ComplexHeatmap", "DESeq2", "apeglm", "clusterProfiler", "pathview", "enrichplot", "S4Vectors", "scater", "fsgea", "msigdbr", "plm",  "BiocParallel", "ggforce", "pathfindR"))
+
+devtools::install_github("mjskay/ARTool")
+devtools::install_github("HelenaLC/muscat", ref = "master")
+devtools::install_github("HelenaLC/muscat", ref = "devel")
+devtools::install_github("satijalab/seurat")
+devtools::install_github("egeulgen/pathfindR")
+
+```
+
+###Bulk RNAseq CODE BELOW
+----------------------------------------------------
+###Load libraries
+
+```{r}
+library("tidyverse")
+library("ComplexHeatmap")
+library("sevenbridges")
+library("apeglm")
+library("clusterProfiler")
+library("enrichplot")
+library("ggplot2")
+
+```
+
+###Prepare Data
+###Load the RDS file with the DDS object and remove samples not meeting criteria for inclusion
+
+```{r}
+dds <- readRDS("/***/***/Documents/Rworking/physiology paper/RNAseq/nhp_timeseries_dds.RDS")
+
+dds[["Sscrofa"]] <- dds[["Sscrofa"]][, dds[["Sscrofa"]]$sample != "M6320_kidney_cortex_biopsy_POD40_TR1"]
+
+dds[["Sscrofa"]] <- dds[["Sscrofa"]][, dds[["Sscrofa"]]$sample != "1501_kidney_cortex_contralateral_POD0_TR1"]
+
+dds[["Sscrofa"]] <- dds[["Sscrofa"]][, dds[["Sscrofa"]]$sample != "1502_kidney_cortex_contralateral_POD0_TR1"]
+
+dds[["Sscrofa"]] <- dds[["Sscrofa"]][, dds[["Sscrofa"]]$sample != "M6320_kidney_cortex_necropsy_POD45_TR1"]
+
+dds[["Sscrofa"]] <- dds[["Sscrofa"]][, dds[["Sscrofa"]]$sample != "21450_kidney_cortex_contralateral_POD0_TR1"]
+
+```
+
+###rlog transformation of counts
+
+```{r}
+library("ComplexHeatmap")
+library("tidyverse")
+library("DESeq2")
+
+dds_rlog <- map(dds, rlog, blind=TRUE)
+
+dds_rlogpig <- dds_rlog[["Sscrofa"]]
+
+dds <- imap(dds, \(x, y) {
+  assay(x, "rlog") <- assay(dds_rlog[[y]])
+  return(x)
+})
+
+```
+
+###Test for significant differences, FDR adjusted
+
+```{r}
+library("DESeq2")
+library("apeglm")
+
+dds$sample_source <- factor(dds$sample_source,
+                      levels=c("contralateral", "biopsy", "necropsy"))
+
+dds_pig <- dds[["Sscrofa"]]
+
+dds_pig$sample_source <- relevel(dds_pig$sample_source, "contralateral" )
+
+design(dds_pig) <- ~ sample_source
+
+#save Robject
+saveRDS(dds_pig, file = "/***/***/Documents/Rworking/physiology paper/RNAseq/physiology_bulkRNAseq_dds.RDS")
+
+de <- DESeq(dds_pig)
+
+resultsNames(de)
+
+res <- results(de, alpha=0.05, name="sample_source_biopsy_vs_contralateral")
+
+reslfccut <- results(de, alpha=0.05, lfcThreshold = 0.5, name="sample_source_biopsy_vs_contralateral")
+
+summary(res)
+
+summary(reslfccut)
+
+results_lfcshrink <- lfcShrink(de,
+                      coef=2,
+                      res=res, type="apeglm")
+
+#write whole transcriptome results
+write.csv(results_lfcshrink, "/***/***/Documents/Rworking/physiology paper/RNAseq/deseqresults.csv")
+
+results_lfcshrinkcut <- lfcShrink(de,
+                      coef=2,
+                      res=reslfccut, type="apeglm", lfcThreshold = 0.7)
+
+#write LFC cutoff transcriptome results
+write.csv(results_lfcshrinkcut, "/***/***/Documents/Rworking/physiology paper/RNAseq/deseqresultscut.csv")
+
+```
+
+###PathfindR Package Pathway Analysis
+
+```{r}
+library("pathfindR")
+library("tidyverse")
+
+pathfinderdf <- as.data.frame(results_lfcshrinkcut[, c(2, 4) ])
+pathfinderdfs <- tibble::rownames_to_column(pathfinderdf, "Gene.symbol")
+
+pfinderdfnona <- na.omit(pathfinderdfs) 
+
+pfinderdfnona <- dplyr::rename(pfinderdfnona, adj.P.val = "svalue")
+
+pathfindRdf_processed <- input_processing(input = pfinderdfnona, # the input: in this case, differential expression results
+                                 p_val_threshold = 0.05, # p value threshold to filter significant genes
+                                 pin_name_path  = "Biogrid", # the name of the PIN to use for active subnetwork search
+                                 convert2alias = TRUE) # boolean indicating whether or not to convert missing symbols to alias symbols in the PIN
+
+#perform pathway analysis using KEGG pathways
+output_df <- run_pathfindR(pfinderdfnona, 
+                           gene_sets = "KEGG",
+                           min_gset_size = 5,
+                           max_gset_size = 500,
+                           iterations=30,
+                           visualize_enriched_terms = FALSE, 
+                           plot_enrichment_chart = FALSE, 
+                           enrichment_threshold = 0.1)
+
+#chart top 20 pathways enriched in nice visualization
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/pathfindRenrichment1.pdf") 
+
+enrichment_chart(result_df = output_df, top_terms = 20)
+
+dev.off()
+
+output_dfkeggrepeat <- run_pathfindR(pfinderdfnona, 
+                           gene_sets = "KEGG",
+                           min_gset_size = 5,
+                           max_gset_size = 500,
+                           iterations=30,
+                           visualize_enriched_terms = FALSE, 
+                           plot_enrichment_chart = FALSE,
+                           enrichment_threshold = 0.1)
+
+#chart top 20 pathways enriched in nice visualization
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/pathfindRenrichment2.pdf") 
+
+enrichment_chart(result_df = output_dfkeggrepeat, top_terms = 20)
+
+dev.off()
+
+#visualize pathways
+visualize_terms(result_df = output_df, 
+                hsa_KEGG = FALSE, # boolean to indicate whether human KEGG gene sets were used for enrichment analysis or not
+                pin_name_path = "Biogrid")
+
+#perform clustering of pathways
+pathfindR_clustered <- cluster_enriched_terms(output_df, plot_dend = FALSE, plot_clusters_graph = FALSE)
+
+#examine top hits
+knitr::kable(RA_clustered[pathfindR_clustered$Status == "Representative", ])
+
+#focus on enrichment of specific clusters, non-immune clusters
+paths_selected <- subset(pathfindR_clustered, Term_Description %in% c("GnRH signaling pathway", "Endocrine and other factor-regulated calcium reabsorption", "Aldosterone-regulated sodium reabsorption", "Aldosterone synthesis and secretion", "Proximal tubule bicarbonate reclamation", "Growth hormone synthesis, secretion and action", "Renin secretion", "Renin-angiotensin system", "Parathyroid hormone synthesis, secretion and action"))
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/nonimmuneclustersenrichment.pdf") 
+
+enrichment_chart(paths_selected, plot_by_cluster = TRUE)
+
+dev.off()
+
+#focus on smaller enrichment of more specific clusters, non-immune clusters
+paths_selected <- subset(pathfindR_clustered, Cluster %in% c(11, 28, 50))
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/smallernonimmuneclustersenrichment.pdf") 
+enrichment_chart(paths_selected, plot_by_cluster = TRUE)
+
+dev.off()
+
+#focus on smaller enrichment of only non-immune clusters of interest
+paths_selected <- subset(pathfindR_clustered, Term_Description %in% c("Endocrine and other factor-regulated calcium reabsorption", "Aldosterone-regulated sodium reabsorption", "Aldosterone synthesis and secretion", "Proximal tubule bicarbonate reclamation", "Renin secretion", "Renin-angiotensin system", "Parathyroid hormone synthesis, secretion and action"))
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/smalleronlynonimmuneclustersenrichment.pdf") 
+
+enrichment_chart(paths_selected, plot_by_cluster = TRUE)
+
+dev.off()
+
+#visualize interesting pathways
+tiff(file="/***/***/Documents/Rworking/physiology paper/RNAseq/termgenegraph.tiff", width=1000, height=1000)
+term_gene_graph(result_df = output_df, use_description = TRUE)
+
+dev.off()
+
+#generate term gene heatmap on results
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/genepathwayheatmap.pdf") 
+
+term_gene_heatmap(result_df = output_df, genes_df = pfinderdfnona)
+
+dev.off()
+
+#generate upset plot of genes/pathways
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/upsetplot.pdf") 
+
+UpSet_plot(result_df = output_df, genes_df = pfinderdfnona)
+
+dev.off()
+
+#perform pathway analysis using GO pathways
+output_df2 <- run_pathfindR(pfinderdfnona, 
+                           gene_sets = "GO-All",
+                           min_gset_size = 5,
+                           max_gset_size = 500)
+
+#chart top 50 pathways enriched in nice visualization
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/pathfindRtopenrichmentGO.pdf") 
+
+enrichment_chart(result_df = output_df2, top_terms = 50)
+
+dev.off()
+
+#perform clustering of GO pathways
+pathfindR_GOCLUSTERS <- cluster_enriched_terms(output_df2, plot_dend = FALSE, plot_clusters_graph = FALSE)
+
+
+#perform pathway analysis using REACTOME pathways
+output_df3 <- run_pathfindR(pfinderdfnona, 
+                           gene_sets = "Reactome",
+                           min_gset_size = 5,
+                           max_gset_size = 500)
+
+#chart top 50 pathways enriched in nice visualization
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/pathfindRtopenrichmentREACTOME.pdf") 
+
+enrichment_chart(result_df = output_df3, top_terms = 50)
+
+dev.off()
+
+#combine try to plot specific pathways of interest KEGG
+combined_dfkegg <- combine_pathfindR_results(result_A = output_df, 
+                                         result_B = output_dfkeggrepeat, plot_common = FALSE)
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/interestingphysiologypathwaysmapped.pdf") 
+
+combined_results_graph(node_size="num_genes", combined_dfkegg, selected_terms = c("Endocrine and other factor-regulated calcium reabsorption", "Proximal tubule bicarbonate reclamation", "Aldosterone-regulated sodium reabsorption", "Growth hormone synthesis, secretion and action", "Mineral Absorption"), use_description = TRUE)
+
+dev.off()
+
+#try to plot specific pathways of interest KEGG - Calcium
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/interestingphysiologypathwaysmappedCa.pdf") 
+
+combined_results_graph(node_size="num_genes", combined_dfkegg, selected_terms = c("Endocrine and other factor-regulated calcium reabsorption", "Proximal tubule bicarbonate reclamation", "Calcium signaling pathway"), use_description = TRUE)
+
+dev.off()
+
+#try to plot specific pathways of interest KEGG - RAAS
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/interestingphysiologypathwaysmappedRAAS.pdf") 
+
+combined_results_graph(node_size="num_genes", combined_dfkegg, selected_terms = c("Aldosterone-regulated sodium reabsorption", "Aldosterone synthesis and secretion", "Mineral Absorption", "Renin secretion", "Renin-angiotensin system", "Vasopressin-regulated water absorption"), use_description = TRUE)
+
+dev.off()
+
+#try to plot specific pathways of interest KEGG - GROWTH
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/interestingphysiologypathwaysmappedGROWTH.pdf") 
+
+combined_results_graph(node_size="num_genes", combined_dfkegg, selected_terms = c("ErbB signaling pathway", "Growth hormone synthesis, secretion and action"), use_description = TRUE)
+
+dev.off()
+
+```
+
+###Plot bargraphs for genes of interest Ca/Phos/FGF
+
+```{r}
+library(MASS) 
+library(reshape2) 
+library(reshape)
+library(ggforce)
+library(ggplot2)
+library(tidyverse)
+library(RColorBrewer)
+library(paletteer)
+
+# Define the number of colors you want
+mycolors = c(brewer.pal(name="Dark2", n = 8), brewer.pal(name="Paired", n = 6), "#000000")
+
+#NOTE SLC34A3, KL are not in our RNASEQ dataset
+genestoplot <- c("CASR", "CLDN14", "CLDN16", "CLDN19", "PTH1R", "SLC34A1", "SLC34A2", "GNAQ", "CYP27B1", "VDR", "TRPM6", "SLC12A1", "SLC20A1", "SLC20A2", "DNASE1", "CYP24A1", "EGR1", "ETV5", "PDZK1", "TRPV5", "NAB2")
+
+# obtaining rlog normalized count read
+genelistforplotting <- assay(dds_rlogpig)[which(row.names(assay(dds_rlogpig)) %in% genestoplot), ]
+
+#melting dataset for visualization
+melted_norm_counts <- data.frame(melt(genelistforplotting))
+
+colnames(melted_norm_counts) <- c("gene", "samplename", "rlog_normalized_counts")
+
+melted_norm_counts$group <- ifelse(melted_norm_counts$samplename %in% colnames(assay(dds_rlogpig))[melted_norm_counts$samplename], "contralateral", ifelse(melted_norm_counts$samplename %in% colnames(assay(dds_rlogpig))[melted_norm_counts$samplename], "biopsy", "necropsy"))
+
+melted_norm_counts <- melted_norm_counts %>% mutate(group = (ifelse(grepl("contralateral", melted_norm_counts$samplename, ignore.case = T), "Contralateral", ifelse(grepl("biopsy", melted_norm_counts$samplename, ignore.case = T), "Biopsy", "Necropsy"))))
+
+#reorder group var
+melted_norm_counts$group <- factor(melted_norm_counts$group , levels=c("Contralateral", "Biopsy", "Necropsy"))
+
+#reorder gene var
+melted_norm_counts$gene <- factor(melted_norm_counts$gene, levels=c("PTH1R", "CASR", "CLDN14", "CLDN16", "CLDN19", "GNAQ", "TRPV5", "TRPM6", "SLC12A1", "EGR1", "ETV5", "PDZK1","NAB2", "DNASE1", "SLC34A1", "SLC34A2", "SLC20A1", "SLC20A2", "CYP27B1", "CYP24A1", "VDR"))
+
+#absolute scales
+boxplotsabs <- ggplot(melted_norm_counts, aes(x = as.factor(gene), y = rlog_normalized_counts)) + geom_point(aes(color=factor(group)), position=position_jitterdodge(dodge.width=0.955)) +
+geom_boxplot(aes(fill = group), position = position_dodge(0.9), alpha=0.4, outlier.shape = NA) +
+facet_wrap(~ gene, scales = "free_x") +
+scale_fill_manual(values = mycolors) + scale_color_manual(values = mycolors) + 
+theme_bw()
+
+tiff(file="/***/***/Documents/Rworking/physiology paper/RNAseq/CAPHOSgenesabs.tiff", width=1000, height=1000) 
+boxplotsabs
+dev.off()
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/CAPHOSgenesabs.pdf") 
+boxplotsabs
+dev.off()
+
+#redo with relative scales
+boxplotsrel <- ggplot(melted_norm_counts, aes(x = as.factor(gene), y = rlog_normalized_counts)) + geom_point(aes(color=factor(group)), position=position_jitterdodge(dodge.width=0.955)) +
+geom_boxplot(aes(fill = group), position = position_dodge(0.9), alpha=0.4, outlier.shape = NA) +
+facet_wrap(~ gene, scales = "free") +
+scale_fill_manual(values = mycolors) + scale_color_manual(values = mycolors) + 
+theme_bw()
+
+tiff(file="/***/***/Documents/Rworking/physiology paper/RNAseq/CAPHOSgenesrel.tiff", width=1000, height=1000) 
+boxplotsrel
+dev.off()
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/RNAseq/CAPHOSgenesrel.pdf") 
+boxplotsrel
+dev.off()
+
+```
+
+###Volcano plot and PCA
+
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(EnhancedVolcano)
+library(PCAtools)
+
+labellist <- c("CASR", "CLDN14", "CLDN16", "CLDN19", "PTH1R", "SLC34A1", "SLC34A2", "GNAQ", "CYP27B1", "VDR", "TRPM6", "SLC12A1", "SLC20A1", "SLC20A2", "DNASE1", "CYP24A1", "EGR1", "ETV5", "PDZK1", "TRPV5", "NAB2", "REN", "VAMP2", "PPARG", "RB1", "PTGES", "PTGES2", "PTGER1", "PTGER2", "PTGER4", "ADRA1", "ADRA2", "ADRB1", "ADRB2", "PRKG2", "EGFR", "ERBB2", "ERBB4", "VEGFA", "VEGFC", "VEGFD", "FLT1", "KDR", "NRP1", "NRP2", "ANGPT1", "ANGPT2", "TIE1", "TEK", "TGFA", "TGFB1", "EGF", "HBEGF", "AREG", "AVPR2", "AVP", "IGF1", "IGF1R", "IGF2R", "IGFBP1", "IGF2BP1", "IGF2BP2", "IGFBP2", "IGFBP4", "IGFBP5", "IGFBP7", "GH1", "GHR","SLC34A1", "SLC20A1", "SLC20A2", "CYP27B1",  "CYP24A1", "DNASE1", "EGR1", "ETV5", "PDZK1", "TRPV5", "NAB2", "LYVE1", "ANXA2", "ACKR3", "ACKR4", "CD36", "FABP4", "BGN", "FLRT2", "CAV1" ,"PROX1", "TGFA", "TGFB1", "EGF", "HBEGF", "AREG", "AVPR2", "AVP", "SLC8A1", "MMP9", "CALB1", "NPY1R", "TNMD", "PRKG2", "AGTR1", "AGTR2", "PCK2", "GLS", "SLC4A4", "CA4", "PCK1", "SCNN1A", "KCNJ1", "ESR1", "ATP1A1", "ATP1A4", "ATP2B3", "PRKCB", "PRKCA", "CREB3L3", "NR4A1", "CAMK4", "NR4A2", "CAMK2B", "KCNK3", "CAMK2A", "AGT", "KCNK9", "CACNA1H", "CACNA1I", "CTSB", "PDE1C", "CLCA2", "ENPEP", "ACE2", "MME", "PAK1", "PAK6", "RAC2", "GSTO1", "MAPK11", "NCF2", "MGST1", "TNF", "ITGB3", "CFTR", "SLC9A4", "TRPM6", "NR4A2", "GATA3", "PDE4B", "PPP3CA", "CLCA2")
+
+#Volcano plot for DESeq (res)
+ EnhancedVolcano(res,
+    lab = rownames(res),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    xlim = c(-10, 10),
+    ylim= c(0, 65),
+    selectLab = FALSE,
+    xlab = bquote(~Log[2]~ 'fold change'),
+    pCutoff = 10e-5,
+    FCcutoff = 1.1,
+    pointSize = 0.75,
+    labSize = 3,
+    labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = FALSE,
+    parseLabels = TRUE,
+    col = c('gray', 'forestgreen', 'deepskyblue3', 'red2'),
+    colAlpha = 0.6,
+    legendPosition = 'bottom',
+    legendLabSize = 14,
+    legendIconSize = 4.0,
+    drawConnectors = FALSE,
+    widthConnectors = 0.5,
+    maxoverlapsConnectors = 3,
+    colConnectors = 'black')
+
+ ggsave(
+  "volcanocontravsbiopsy.pdf",
+  plot = last_plot(),
+  path = ("/***/***/Documents/Rworking/physiology paper/RNAseq/"),
+  width = 8,
+  height = 12,
+  limitsize = TRUE,
+  bg = NULL,)
+ 
+#Volcano plot for DESeq (res) with labels
+ EnhancedVolcano(res,
+    lab = rownames(res),
+    selectLab = labellist,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    xlim = c(-10, 10),
+    ylim= c(0, 65),
+    xlab = bquote(~Log[2]~ 'fold change'),
+    pCutoff = 10e-5,
+    FCcutoff = 1.1,
+    pointSize = 1.0,
+    labSize = 5.4,
+    labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = FALSE,
+    parseLabels = TRUE,
+    col = c('gray', 'forestgreen', 'deepskyblue3', 'red2'),
+    colAlpha = 0.6,
+    legendPosition = 'top',
+    legendLabSize = 14,
+    legendIconSize = 4.0,
+    drawConnectors = TRUE,
+    widthConnectors = 0.4,
+    maxoverlapsConnectors = 14,
+    colConnectors = 'black')
+
+ ggsave(
+  "volcanocontravsbiopsywithlab.pdf",
+  plot = last_plot(),
+  path = ("/***/***/Documents/Rworking/physiology paper/RNAseq/"),
+  width = 8,
+  height = 10,
+  limitsize = TRUE,
+  bg = NULL,)
+ 
+#PCA with ggplot
+pcaData <- plotPCA(dds_rlogpig, intgroup=c("sample_source", "pig_id"), returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+pcaplot1 <- ggplot(pcaData, aes(x = PC1, y = PC2, color = sample_source, shape = sample_source, label=pig_id)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed()
+
+pcaplot1
+
+ggsave(
+  "PCAwholesamples.pdf",
+  plot = last_plot(),
+  path = ("/***/***/Documents/Rworking/physiology paper/RNAseq/"),
+  width = 6,
+  height = 4,
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL,)
+
+```
+
+###scRNAseq CODE BELOW
+----------------------------------------------------
+
+###Load the scRNAseq object from SBridges
+
+```{r}
+
+#paper version of scRNAseq
+sce <- readRDS("/***/***/Documents/Rworking/physiology paper/scRNAseq/physiology_manuscript_scrnaseq_v1.0.0.RDS")
+
+```
+
+###scRNAseq Analysis
+
+```{r}
+library("scran")
+library("scater")
+library("matrixStats")
+library("SingleCellExperiment")
+library("ComplexHeatmap")
+library("tidyverse")
+library("RColorBrewer")
+library("paletteer")
+library("dittoSeq")
+library("oncomix")
+library("muscat")
+library("circlize")
+library("Seurat")
+library("edgeR")
+
+# Define the number of colors you want
+mycolors = c(brewer.pal(name="Dark2", n = 6), brewer.pal(name="Paired", n = 6), "#000000")
+
+col_fun = colorRamp2(c(-5, 0, 5), c("blue", "white", "red"))
+col_fun(seq(-5, 5))
+
+col_funprop = colorRamp2(c(0, 1), c("white", "red"))
+col_funprop(seq(0, 1))
+
+#subset sce based on cell_types of interest
+cellstouse = c("Collecting Duct", "Collecting Duct Intercalated Type A", "Collecting Duct Intercalated Type B", "Collecting Duct Principle", "Distal Convoluted Tubule", "Endothelial", "Fenestrated Endothelial", "Fibroblasts", "Glomerular Endothelial", "Pericytes", "Podocytes", "Proximal Tubule", "Thick Ascending Limb", "Thin Ascending Limb", "Umbrella Cells")
+
+samplesourcetouse = c("contralateral", "biopsy")
+
+samplestouse = c("M6521_kidney_cortex_contralateral_POD0", "M4321_kidney_cortex_biopsy_POD65", "M4321_kidney_cortex_contralateral_POD0", "M8320_kidney_cortex_contralateral_POD0", "M4321_kidney_medulla_contralateral_POD0", "M8020_kidney_cortex_biopsy_POD184")
+
+sce <- sce[, sce$cell_type %in% cellstouse]
+sce <- sce[, sce$sample_source %in% samplesourcetouse]
+sce <- sce[, sce$sample_name %in% samplestouse]
+
+#pick genes to heatmap
+features_sc <- c("AGT", "REN", "CASR", "CLDN14", "CALB1", "CDH2", "CDH1", "CYP27B1", "PECAM1", "RGS5") 
+
+#UMAP overall for subsets
+umapoverall <- ggcells(sce, aes(x=UMAP.1, y=UMAP.2, color=cell_type)) +
+    geom_point(size=0.4, alpha=0.5) + scale_color_manual(values=mycolors)
+    theme_bw()
+
+ ggsave(
+  "scUMAPsubset.pdf",
+  plot = last_plot(),
+  path = ("/***/***/Documents/Rworking/physiology paper/scRNAseq/"),
+  width = 16,
+  height = 12,
+  limitsize = TRUE,
+  bg = NULL,)
+ 
+#UMAP LABELING
+labeledumap <- LabelClusters(plot = umapoverall, id = sce$cell_type, repel = TRUE, geom = "GeomPoint", position = "median")
+
+ ggsave(
+  "UMAPlabeled.pdf",
+  plot = last_plot(),
+  path = ("/***/***/Documents/Rworking/physiology paper/scRNAseq/"),
+  width = 16,
+  height = 12,
+  limitsize = TRUE,
+  bg = NULL,)
+
+#UMAP of specific cells, faceted
+sce |>
+  makePerCellDF(features=c("CASR", "CLDN14", "UBC")) |>
+  pivot_longer(all_of(c("CASR", "CLDN14", "UBC")), names_to="feature", values_to="logcounts") |>
+  ggplot(aes(x=UMAP.1, y=UMAP.2, color=logcounts, alpha=0.7)) +
+    geom_point(size=0.15) +
+    scale_color_gradient(low="grey90", high="firebrick1") +
+    theme_classic() +
+    facet_grid(feature~factor(sample_source, levels=c('contralateral','biopsy')))
+
+ ggsave(
+  "scUMAPwithgenes.pdf",
+  plot = last_plot(),
+  path = ("/***/***/Documents/Rworking/physiology paper/scRNAseq/"),
+  width = 12,
+  height = 12,
+  limitsize = TRUE,
+  bg = NULL,)
+
+####
+dist_no_na <- function(mat) {
+    edist <- dist(mat)
+    edist[which(is.na(edist))] <- max(edist, na.rm=TRUE) * 1.1 
+    return(edist)}
+
+#manual heatmap using complexheatmap - logcounts
+count_mat_sc <- summarizeAssayByGroup(sce, colData(sce)[, c("cell_type", "sample_source")], subset.row = features_sc, statistics = c("mean"))
+
+colnames(count_mat_sc) <- str_glue(
+  "{sample_source}_{cell_type}",
+  sample_source=count_mat_sc$sample_source,
+  cell_type=count_mat_sc$cell_type)
+
+heatmap_anno_sc <- HeatmapAnnotation(
+  sample_source=count_mat_sc$sample_source,
+  cell_type=count_mat_sc$cell_type)
+
+count_mat_sc1 <- assay(count_mat_sc, "mean")
+
+col_order <- str_c(
+  c("contralateral", "biopsy"),
+  rep(unique(sce$cell_type), each=2), sep="_")
+col_order <- col_order[col_order %in% colnames(count_mat_sc1)]
+
+scheat1 <- Heatmap(
+  t(scale(t(count_mat_sc1))), col = col_fun, row_order = c("CDH1", "CDH2", "PECAM1", "RGS5", "AGT", "REN", "CASR", "CLDN14", "CALB1", "CYP27B1"), show_column_dend=FALSE, show_row_dend=FALSE, clustering_distance_rows = dist_no_na, clustering_distance_columns = dist_no_na, top_annotation=heatmap_anno_sc,
+  cluster_column_slices=FALSE, column_split = factor(count_mat_sc$cell_type), cluster_column = FALSE, column_order = col_order, 
+  column_title_rot=90)
+
+draw(scheat1, padding=unit(c(50, 1, 50, 1), "mm"))
+
+tiff(file="/***/***/Documents/Rworking/physiology paper/scRNAseq/scheat1.tiff", width=3000, height=1000) 
+par(margin = c(10, 10, 10, 10))
+scheat1
+dev.off()
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/scRNAseq/scheat1.pdf", width=16,height=8) 
+scheat1
+dev.off() 
+ 
+#manual heatmap using complexheatmap - proportion
+count_mat_scprop <- summarizeAssayByGroup(sce, colData(sce)[, c("cell_type", "sample_source")], subset.row = features_sc, statistics = c("prop.detected"))
+
+colnames(count_mat_scprop) <- str_glue(
+  "{sample_source}_{cell_type}",
+  sample_source=count_mat_scprop$sample_source,
+  cell_type=count_mat_scprop$cell_type)
+
+heatmap_anno_sc <- HeatmapAnnotation(
+  sample_source=count_mat_scprop$sample_source,
+  cell_type=count_mat_scprop$cell_type)
+
+count_mat_sc1prop <- assay(count_mat_scprop, "prop.detected")
+
+col_orderprop <- str_c(
+  c("contralateral", "biopsy"),
+  rep(unique(sce$cell_type), each=2), sep="_")
+col_orderprop <- col_orderprop[col_orderprop %in% colnames(count_mat_scprop)]
+
+scheat1prop <- Heatmap(
+  count_mat_sc1prop, col = col_funprop, row_order = c("CDH1", "CDH2", "PECAM1", "RGS5", "AGT", "REN", "CASR", "CLDN14", "CALB1", "CYP27B1"), show_column_dend=FALSE, show_row_dend=FALSE, clustering_distance_rows = dist_no_na, clustering_distance_columns = dist_no_na, top_annotation=heatmap_anno_sc,
+  cluster_column_slices=FALSE, column_split = factor(count_mat_sc$cell_type), cluster_column = FALSE, column_order = col_orderprop, 
+  column_title_rot=90)
+
+draw(scheat1, padding=unit(c(50, 1, 50, 1), "mm"))
+
+tiff(file="/***/***/Documents/Rworking/physiology paper/scRNAseq/scheat1prop.tiff", width=3000, height=1000) 
+draw(scheat1prop, padding=unit(c(50, 1, 50, 1), "mm"))
+dev.off()
+
+pdf(file="/***/***/Documents/Rworking/physiology paper/scRNAseq/scheat1prop.pdf", width=16,height=8) 
+scheat1prop
+dev.off()
+
+```
+
+
